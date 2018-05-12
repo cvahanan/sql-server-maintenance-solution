@@ -22,6 +22,8 @@ ALTER PROCEDURE [dbo].[DatabaseIntegrityCheck]
 @AvailabilityGroupReplicas nvarchar(max) = 'ALL',
 @Updateability nvarchar(max) = 'ALL',
 @LockTimeout int = NULL,
+@ExecutionMode nvarchar(max) = NULL,
+@DatabaseOrder nvarchar(max) = 'NAME_ASC',
 @LogToTable nvarchar(max) = 'N',
 @Execute nvarchar(max) = 'Y'
 
@@ -50,6 +52,9 @@ BEGIN
   DECLARE @AmazonRDS bit
 
   DECLARE @Cluster nvarchar(max)
+
+  DECLARE @QueueID int
+  DECLARE @QueueStartTime datetime
 
   DECLARE @CurrentDBID int
   DECLARE @CurrentDatabaseID int
@@ -100,6 +105,7 @@ BEGIN
                                DatabaseType nvarchar(max),
                                AvailabilityGroup bit,
                                [Snapshot] bit,
+                               DatabaseOrder int,
                                Selected bit,
                                Completed bit,
                                PRIMARY KEY(Selected, Completed, ID))
@@ -187,6 +193,8 @@ BEGIN
   SET @Parameters = @Parameters + ', @AvailabilityGroupReplicas = ' + ISNULL('''' + REPLACE(@AvailabilityGroupReplicas,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @Updateability = ' + ISNULL('''' + REPLACE(@Updateability,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @LockTimeout = ' + ISNULL(CAST(@LockTimeout AS nvarchar),'NULL')
+  SET @Parameters = @Parameters + ', @ExecutionMode = ' + ISNULL('''' + REPLACE(@ExecutionMode,'''','''''') + '''','NULL')
+  SET @Parameters = @Parameters + ', @DatabaseOrder = ' + ISNULL('''' + REPLACE(@DatabaseOrder,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @LogToTable = ' + ISNULL('''' + REPLACE(@LogToTable,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @Execute = ' + ISNULL('''' + REPLACE(@Execute,'''','''''') + '''','NULL')
 
@@ -236,6 +244,34 @@ BEGIN
   IF @LogToTable = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'CommandLog')
   BEGIN
     SET @ErrorMessage = 'The table CommandLog is missing. Download https://ola.hallengren.com/scripts/CommandLog.sql.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF @ExecutionMode = 'DATABASES_IN_PARALLEL' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'Queue')
+  BEGIN
+    SET @ErrorMessage = 'The table Queue is missing. Download https://ola.hallengren.com/scripts/Queue.sql.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF @ExecutionMode = 'DATABASES_IN_PARALLEL' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'QueueDatabase')
+  BEGIN
+    SET @ErrorMessage = 'The table QueueDatabase is missing. Download https://ola.hallengren.com/scripts/QueueDatabase.sql.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF @@TRANCOUNT <> 0
+  BEGIN
+    SET @ErrorMessage = 'The transaction count is not 0.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF SERVERPROPERTY('EngineEdition') = 5 AND @Version < 12
+  BEGIN
+    SET @ErrorMessage = 'The stored procedure DatabaseIntegrityCheck is not supported on this version of Azure SQL Database.' + CHAR(13) + CHAR(10) + ' '
     RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
     SET @Error = @@ERROR
   END
@@ -451,6 +487,64 @@ BEGIN
   END
 
   ----------------------------------------------------------------------------------------------------
+  --// Update database order                                                                      //--
+  ----------------------------------------------------------------------------------------------------
+
+  IF @DatabaseOrder = 'NAME_ASC'
+  BEGIN
+    WITH tmpDatabases AS (
+    SELECT DatabaseName, DatabaseOrder, ROW_NUMBER() OVER (ORDER BY DatabaseName ASC) AS RowNumber
+    FROM @tmpDatabases tmpDatabases
+    WHERE Selected = 1
+    )
+    UPDATE tmpDatabases
+    SET DatabaseOrder = RowNumber
+  END
+
+  IF @DatabaseOrder = 'NAME_DESC'
+  BEGIN
+    WITH tmpDatabases AS (
+    SELECT DatabaseName, DatabaseOrder, ROW_NUMBER() OVER (ORDER BY DatabaseName DESC) AS RowNumber
+    FROM @tmpDatabases tmpDatabases
+    WHERE Selected = 1
+    )
+    UPDATE tmpDatabases
+    SET DatabaseOrder = RowNumber
+  END
+
+  IF @DatabaseOrder = 'SIZE_ASC'
+  BEGIN
+    WITH tmpDatabases AS (
+    SELECT DatabaseName, DatabaseOrder, ROW_NUMBER() OVER (ORDER BY size ASC) AS RowNumber
+    FROM @tmpDatabases tmpDatabases
+    INNER JOIN (SELECT DB_NAME(database_id) AS [database_name], SUM(size) AS size
+                FROM sys.master_files
+                WHERE [type] = 0
+                GROUP BY database_id) [master_files]
+    ON tmpDatabases.DatabaseName = [master_files].[database_name]
+    WHERE Selected = 1
+    )
+    UPDATE tmpDatabases
+    SET DatabaseOrder = RowNumber
+  END
+
+  IF @DatabaseOrder = 'SIZE_DESC'
+  BEGIN
+    WITH tmpDatabases AS (
+    SELECT DatabaseName, DatabaseOrder, ROW_NUMBER() OVER (ORDER BY size DESC) AS RowNumber
+    FROM @tmpDatabases tmpDatabases
+    INNER JOIN (SELECT DB_NAME(database_id) AS [database_name], SUM(size) AS size
+                FROM sys.master_files
+                WHERE [type] = 0
+                GROUP BY database_id) [master_files]
+    ON tmpDatabases.DatabaseName = [master_files].[database_name]
+    WHERE Selected = 1
+    )
+    UPDATE tmpDatabases
+    SET DatabaseOrder = RowNumber
+  END
+
+  ----------------------------------------------------------------------------------------------------
   --// Select filegroups                                                                          //--
   ----------------------------------------------------------------------------------------------------
 
@@ -652,6 +746,20 @@ BEGIN
     SET @Error = @@ERROR
   END
 
+  IF @ExecutionMode NOT IN('DATABASES_IN_PARALLEL')
+  BEGIN
+    SET @ErrorMessage = 'The value for the parameter @ExecutionMode is not supported.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF @DatabaseOrder NOT IN('NAME_ASC','NAME_DESC','SIZE_ASC','SIZE_DESC') OR @DatabaseOrder IS NULL
+  BEGIN
+    SET @ErrorMessage = 'The value for the parameter @DatabaseOrder is not supported.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
   IF @LogToTable NOT IN('Y','N') OR @LogToTable IS NULL
   BEGIN
     SET @ErrorMessage = 'The value for the parameter @LogToTable is not supported.' + CHAR(13) + CHAR(10) + ' '
@@ -763,18 +871,149 @@ BEGIN
   END
 
   ----------------------------------------------------------------------------------------------------
+  --// Update the queue                                                                           //--
+  ----------------------------------------------------------------------------------------------------
+
+  IF @ExecutionMode = 'DATABASES_IN_PARALLEL'
+  BEGIN
+
+    BEGIN TRY
+
+      SELECT @QueueID = QueueID
+      FROM [dbo].[Queue]
+      WHERE SchemaName = @SchemaName
+      AND ObjectName = @ObjectName
+      AND Parameters = @Parameters
+
+      IF @QueueID IS NULL
+      BEGIN
+        BEGIN TRANSACTION
+
+        SELECT @QueueID = QueueID
+        FROM [dbo].[Queue] WITH (UPDLOCK, TABLOCK)
+        WHERE SchemaName = @SchemaName
+        AND ObjectName = @ObjectName
+        AND Parameters = @Parameters
+
+        IF @QueueID IS NULL
+        BEGIN
+          INSERT INTO [dbo].[Queue] (SchemaName, ObjectName, Parameters)
+          SELECT @SchemaName, @ObjectName, @Parameters
+
+          SET @QueueID = SCOPE_IDENTITY()
+        END
+
+        COMMIT TRANSACTION
+      END
+
+      BEGIN TRANSACTION
+
+      UPDATE [dbo].[Queue]
+      SET QueueStartTime = GETDATE(),
+          SessionID = @@SPID,
+          RequestID = (SELECT request_id FROM sys.dm_exec_requests WHERE session_id = @@SPID),
+          RequestStartTime = (SELECT start_time FROM sys.dm_exec_requests WHERE session_id = @@SPID)
+      WHERE QueueID = @QueueID
+      AND NOT EXISTS (SELECT *
+                      FROM sys.dm_exec_requests
+                      WHERE session_id = SessionID
+                      AND request_id = RequestID
+                      AND start_time = RequestStartTime)
+      AND NOT EXISTS (SELECT *
+                      FROM [dbo].[QueueDatabase] QueueDatabase
+                      INNER JOIN sys.dm_exec_requests ON SessionID = session_id AND RequestID = request_id AND RequestStartTime = start_time
+                      WHERE QueueID = @QueueID)
+
+      IF @@ROWCOUNT = 1
+      BEGIN
+        INSERT INTO [dbo].[QueueDatabase] (QueueID, DatabaseName)
+        SELECT @QueueID AS QueueID,
+                DatabaseName
+        FROM @tmpDatabases tmpDatabases
+        WHERE Selected = 1
+        AND NOT EXISTS (SELECT * FROM [dbo].[QueueDatabase] WHERE DatabaseName = tmpDatabases.DatabaseName AND QueueID = @QueueID)
+
+        DELETE
+        FROM [dbo].[QueueDatabase]
+        WHERE QueueID = @QueueID
+        AND NOT EXISTS (SELECT * FROM @tmpDatabases tmpDatabases WHERE DatabaseName = [dbo].[QueueDatabase].DatabaseName AND Selected = 1)
+
+        UPDATE QueueDatabase
+        SET DatabaseOrder = tmpDatabases.DatabaseOrder
+        FROM [dbo].[QueueDatabase] QueueDatabase
+        INNER JOIN @tmpDatabases tmpDatabases ON QueueDatabase.DatabaseName = tmpDatabases.DatabaseName
+      END
+
+      COMMIT TRANSACTION
+
+      SELECT @QueueStartTime = QueueStartTime
+      FROM [dbo].[Queue]
+      WHERE QueueID = @QueueID
+
+    END TRY
+
+    BEGIN CATCH
+      IF XACT_STATE() <> 0
+      BEGIN
+        ROLLBACK TRANSACTION
+      END
+      SET @ErrorMessage = 'Msg ' + CAST(ERROR_NUMBER() AS nvarchar) + ', ' + ISNULL(ERROR_MESSAGE(),'') + CHAR(13) + CHAR(10) + ' '
+      RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+      SET @Error = @@ERROR
+      SET @ReturnCode = @Error
+      GOTO Logging
+    END CATCH
+
+  END
+
+  ----------------------------------------------------------------------------------------------------
   --// Execute commands                                                                           //--
   ----------------------------------------------------------------------------------------------------
 
   WHILE (1 = 1)
   BEGIN
 
-    SELECT TOP 1 @CurrentDBID = ID,
-                 @CurrentDatabaseName = DatabaseName
-    FROM @tmpDatabases
-    WHERE Selected = 1
-    AND Completed = 0
-    ORDER BY ID ASC
+    IF @ExecutionMode = 'DATABASES_IN_PARALLEL'
+    BEGIN
+      UPDATE [dbo].[QueueDatabase]
+      SET DatabaseStartTime = NULL,
+          SessionID = NULL,
+          RequestID = NULL,
+          RequestStartTime = NULL
+      WHERE QueueID = @QueueID
+      AND DatabaseStartTime IS NOT NULL
+      AND DatabaseEndTime IS NULL
+      AND NOT EXISTS (SELECT * FROM sys.dm_exec_requests WHERE session_id = QueueDatabase.SessionID AND request_id = QueueDatabase.RequestID AND start_time = QueueDatabase.RequestStartTime)
+
+      UPDATE QueueDatabase
+      SET DatabaseStartTime = GETDATE(),
+          DatabaseEndTime = NULL,
+          SessionID = @@SPID,
+          RequestID = (SELECT request_id FROM sys.dm_exec_requests WHERE session_id = @@SPID),
+          RequestStartTime = (SELECT start_time FROM sys.dm_exec_requests WHERE session_id = @@SPID),
+          @CurrentDatabaseName = DatabaseName
+      FROM (SELECT TOP 1 DatabaseStartTime,
+                         DatabaseEndTime,
+                         SessionID,
+                         RequestID,
+                         RequestStartTime,
+                         DatabaseName
+            FROM [dbo].[QueueDatabase]
+            WHERE QueueID = @QueueID
+            AND (DatabaseStartTime < @QueueStartTime OR DatabaseStartTime IS NULL)
+            AND NOT (DatabaseStartTime IS NOT NULL AND DatabaseEndTime IS NULL)
+            ORDER BY DatabaseOrder ASC
+            ) QueueDatabase
+    END
+    ELSE
+    BEGIN
+      SELECT TOP 1 @CurrentDBID = ID,
+                   @CurrentDatabaseName = DatabaseName
+      FROM @tmpDatabases
+      WHERE Selected = 1
+      AND Completed = 0
+      ORDER BY DatabaseOrder ASC
+    END
 
     IF @@ROWCOUNT = 0
     BEGIN
@@ -1181,11 +1420,21 @@ BEGIN
     END
 
     -- Update that the database is completed
-    UPDATE @tmpDatabases
-    SET Completed = 1
-    WHERE Selected = 1
-    AND Completed = 0
-    AND ID = @CurrentDBID
+    IF @ExecutionMode = 'DATABASES_IN_PARALLEL'
+    BEGIN
+      UPDATE [dbo].[QueueDatabase]
+      SET DatabaseEndTime = GETDATE()
+      WHERE QueueID = @QueueID
+      AND DatabaseName = @CurrentDatabaseName
+    END
+    ELSE
+    BEGIN
+      UPDATE @tmpDatabases
+      SET Completed = 1
+      WHERE Selected = 1
+      AND Completed = 0
+      AND ID = @CurrentDBID
+    END
 
     -- Clear variables
     SET @CurrentDBID = NULL
