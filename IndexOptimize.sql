@@ -48,7 +48,7 @@ BEGIN
   --// Source:  https://ola.hallengren.com                                                        //--
   --// License: https://ola.hallengren.com/license.html                                           //--
   --// GitHub:  https://github.com/olahallengren/sql-server-maintenance-solution                  //--
-  --// Version: 2018-06-12 14:58:57                                                               //--
+  --// Version: 2018-06-12 15:13:23                                                               //--
   ----------------------------------------------------------------------------------------------------
 
   SET NOCOUNT ON
@@ -1559,7 +1559,7 @@ BEGIN
         AND (
         (@OnlyModifiedStatistics = 'N' AND @StatisticsModificationLevel IS NULL)
         OR (@OnlyModifiedStatistics = 'Y' AND @CurrentModificationCounter > 0)
-        OR ((@CurrentModificationCounter * 1. / @CurrentRowCount) * 100 >= @StatisticsModificationLevel)
+        OR ((@CurrentModificationCounter * 1. / NULLIF(@CurrentRowCount,0)) * 100 >= @StatisticsModificationLevel)
         OR (@StatisticsModificationLevel IS NOT NULL AND (@CurrentModificationCounter >= SQRT(@CurrentRowCount * 1000)))
         OR (@CurrentIsMemoryOptimized = 1 AND NOT (@Version >= 13 OR SERVERPROPERTY('EngineEdition') IN (5,8)))
         )
