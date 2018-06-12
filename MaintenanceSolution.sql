@@ -10,7 +10,7 @@ License: https://ola.hallengren.com/license.html
 
 GitHub: https://github.com/olahallengren/sql-server-maintenance-solution
 
-Version: 2018-06-11 19:25:33
+Version: 2018-06-12 14:58:57
 
 You can contact me by e-mail at ola@hallengren.com.
 
@@ -117,7 +117,7 @@ BEGIN
   --// Source:  https://ola.hallengren.com                                                        //--
   --// License: https://ola.hallengren.com/license.html                                           //--
   --// GitHub:  https://github.com/olahallengren/sql-server-maintenance-solution                  //--
-  --// Version: 2018-06-11 19:25:33                                                               //--
+  --// Version: 2018-06-12 14:58:57                                                               //--
   ----------------------------------------------------------------------------------------------------
 
   SET NOCOUNT ON
@@ -364,7 +364,7 @@ BEGIN
   --// Source:  https://ola.hallengren.com                                                        //--
   --// License: https://ola.hallengren.com/license.html                                           //--
   --// GitHub:  https://github.com/olahallengren/sql-server-maintenance-solution                  //--
-  --// Version: 2018-06-11 19:25:33                                                               //--
+  --// Version: 2018-06-12 14:58:57                                                               //--
   ----------------------------------------------------------------------------------------------------
 
   SET NOCOUNT ON
@@ -3058,7 +3058,7 @@ BEGIN
   --// Source:  https://ola.hallengren.com                                                        //--
   --// License: https://ola.hallengren.com/license.html                                           //--
   --// GitHub:  https://github.com/olahallengren/sql-server-maintenance-solution                  //--
-  --// Version: 2018-06-11 19:25:33                                                               //--
+  --// Version: 2018-06-12 14:58:57                                                               //--
   ----------------------------------------------------------------------------------------------------
 
   SET NOCOUNT ON
@@ -4383,6 +4383,7 @@ ALTER PROCEDURE [dbo].[IndexOptimize]
 @LOBCompaction nvarchar(max) = 'Y',
 @UpdateStatistics nvarchar(max) = NULL,
 @OnlyModifiedStatistics nvarchar(max) = 'N',
+@StatisticsModificationLevel int = NULL,
 @StatisticsSample int = NULL,
 @StatisticsResample nvarchar(max) = 'N',
 @PartitionLevel nvarchar(max) = 'Y',
@@ -4406,7 +4407,7 @@ BEGIN
   --// Source:  https://ola.hallengren.com                                                        //--
   --// License: https://ola.hallengren.com/license.html                                           //--
   --// GitHub:  https://github.com/olahallengren/sql-server-maintenance-solution                  //--
-  --// Version: 2018-06-11 19:25:33                                                               //--
+  --// Version: 2018-06-12 14:58:57                                                               //--
   ----------------------------------------------------------------------------------------------------
 
   SET NOCOUNT ON
@@ -4636,6 +4637,7 @@ BEGIN
   SET @Parameters = @Parameters + ', @LOBCompaction = ' + ISNULL('''' + REPLACE(@LOBCompaction,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @UpdateStatistics = ' + ISNULL('''' + REPLACE(@UpdateStatistics,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @OnlyModifiedStatistics = ' + ISNULL('''' + REPLACE(@OnlyModifiedStatistics,'''','''''') + '''','NULL')
+  SET @Parameters = @Parameters + ', @StatisticsModificationLevel = ' + ISNULL(CAST(@StatisticsModificationLevel AS nvarchar),'NULL')
   SET @Parameters = @Parameters + ', @StatisticsSample = ' + ISNULL(CAST(@StatisticsSample AS nvarchar),'NULL')
   SET @Parameters = @Parameters + ', @StatisticsResample = ' + ISNULL('''' + REPLACE(@StatisticsResample,'''','''''') + '''','NULL')
   SET @Parameters = @Parameters + ', @PartitionLevel = ' + ISNULL('''' + REPLACE(@PartitionLevel,'''','''''') + '''','NULL')
@@ -5177,6 +5179,20 @@ BEGIN
   IF @OnlyModifiedStatistics NOT IN('Y','N') OR @OnlyModifiedStatistics IS NULL
   BEGIN
     SET @ErrorMessage = 'The value for the parameter @OnlyModifiedStatistics is not supported.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF @StatisticsModificationLevel <= 0 OR @StatisticsModificationLevel > 100
+  BEGIN
+    SET @ErrorMessage = 'The value for the parameter @StatisticsModificationLevel is not supported.' + CHAR(13) + CHAR(10) + ' '
+    RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
+    SET @Error = @@ERROR
+  END
+
+  IF @OnlyModifiedStatistics = 'Y' AND @StatisticsModificationLevel IS NOT NULL
+  BEGIN
+    SET @ErrorMessage = 'You can only specify one of the parameters @OnlyModifiedStatistics and @StatisticsModificationLevel.' + CHAR(13) + CHAR(10) + ' '
     RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
     SET @Error = @@ERROR
   END
@@ -5898,7 +5914,15 @@ BEGIN
         -- Update statistics?
         IF @CurrentStatisticsID IS NOT NULL
         AND ((@UpdateStatistics = 'ALL' AND (@CurrentIndexType IN (1,2,3,4,7) OR @CurrentIndexID IS NULL)) OR (@UpdateStatistics = 'INDEX' AND @CurrentIndexID IS NOT NULL AND @CurrentIndexType IN (1,2,3,4,7)) OR (@UpdateStatistics = 'COLUMNS' AND @CurrentIndexID IS NULL))
-        AND (@CurrentModificationCounter > 0 OR @OnlyModifiedStatistics = 'N' OR (@CurrentIsMemoryOptimized = 1 AND NOT (@Version >= 13 OR SERVERPROPERTY('EngineEdition') IN (5,8))))
+
+        AND (
+        (@OnlyModifiedStatistics = 'N' AND @StatisticsModificationLevel IS NULL)
+        OR (@OnlyModifiedStatistics = 'Y' AND @CurrentModificationCounter > 0)
+        OR ((@CurrentModificationCounter * 1. / @CurrentRowCount) * 100 >= @StatisticsModificationLevel)
+        OR (@StatisticsModificationLevel IS NOT NULL AND (@CurrentModificationCounter >= SQRT(@CurrentRowCount * 1000)))
+        OR (@CurrentIsMemoryOptimized = 1 AND NOT (@Version >= 13 OR SERVERPROPERTY('EngineEdition') IN (5,8)))
+        )
+
         AND ((@CurrentIsPartition = 0 AND (@CurrentAction NOT IN('INDEX_REBUILD_ONLINE','INDEX_REBUILD_OFFLINE') OR @CurrentAction IS NULL)) OR (@CurrentIsPartition = 1 AND (@CurrentPartitionNumber = @CurrentPartitionCount OR (@PartitionLevelStatistics = 1 AND @CurrentIsIncremental = 1))))
 
         BEGIN
